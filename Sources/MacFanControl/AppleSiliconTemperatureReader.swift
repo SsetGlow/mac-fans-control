@@ -28,34 +28,44 @@ enum AppleSiliconTemperatureReader {
     private static let temperatureUsage = 0x0005
     private static let temperatureEventType: Int64 = 15
     private static let temperatureField = Int32(temperatureEventType << 16)
-    private static var client: IOHIDEventSystemClient?
-    private static var sensors: [HIDTemperatureSensor]?
+    private static let cache = HIDTemperatureSensorCache()
 
     static func read() -> [TemperatureReading] {
-        var readings: [TemperatureReading] = []
+        cache.lock.lock()
+        defer { cache.lock.unlock() }
+
+        var readingsByProduct: [String: TemperatureReading] = [:]
         for sensor in cachedSensors() {
             guard let value = copyTemperature(from: sensor.service), isValidTemperature(value) else {
                 continue
             }
 
-            readings.append(TemperatureReading(
-                key: sensor.key,
+            let reading = TemperatureReading(
+                key: "HID-\(sensor.product)",
                 label: label(for: sensor.product, group: sensor.group),
                 group: sensor.group,
                 celsius: value
-            ))
+            )
+
+            // IOHID can expose the same named sensor through several services.
+            // Keep the hottest value so the dashboard stays conservative without
+            // rendering a grid full of visually identical cards.
+            if let existing = readingsByProduct[sensor.product], existing.celsius >= value {
+                continue
+            }
+            readingsByProduct[sensor.product] = reading
         }
 
-        return readings
+        return Array(readingsByProduct.values)
     }
 
     private static func cachedSensors() -> [HIDTemperatureSensor] {
-        if let sensors {
+        if let sensors = cache.sensors {
             return sensors
         }
 
         let client = HIDEventSystemClientCreate(kCFAllocatorDefault)
-        self.client = client
+        cache.client = client
 
         let match = [
             "PrimaryUsagePage": appleVendorPage,
@@ -64,11 +74,11 @@ enum AppleSiliconTemperatureReader {
         _ = HIDEventSystemClientSetMatching(client, match)
 
         guard let services = IOHIDEventSystemClientCopyServices(client) as? [Any] else {
-            sensors = []
+            cache.sensors = []
             return []
         }
 
-        let discovered = services.enumerated().compactMap { index, rawService -> HIDTemperatureSensor? in
+        let discovered = services.compactMap { rawService -> HIDTemperatureSensor? in
             let service = rawService as! IOHIDServiceClient
             guard let product = copyProductName(from: service),
                   let group = classify(product: product) else {
@@ -76,14 +86,13 @@ enum AppleSiliconTemperatureReader {
             }
 
             return HIDTemperatureSensor(
-                key: "HID\(index)-\(product)",
                 product: product,
                 group: group,
                 service: service
             )
         }
 
-        sensors = discovered
+        cache.sensors = discovered
         return discovered
     }
 
@@ -136,8 +145,13 @@ enum AppleSiliconTemperatureReader {
 }
 
 private struct HIDTemperatureSensor {
-    let key: String
     let product: String
     let group: TemperatureScope
     let service: IOHIDServiceClient
+}
+
+private final class HIDTemperatureSensorCache: @unchecked Sendable {
+    let lock = NSLock()
+    var client: IOHIDEventSystemClient?
+    var sensors: [HIDTemperatureSensor]?
 }

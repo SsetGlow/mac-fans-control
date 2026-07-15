@@ -25,29 +25,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let notificationCenter = NSWorkspace.shared.notificationCenter
         workspaceObservers.forEach { notificationCenter.removeObserver($0) }
         workspaceObservers.removeAll()
-        store.restoreAutomaticControl()
+        store.prepareForTermination()
     }
 
     @objc private func showWindow() {
-        if window == nil {
-            let content = ControlView(store: store)
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 820, height: 680),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "Mac Fan Control"
-            window.center()
-            window.isReleasedWhenClosed = false
-            window.delegate = self
-            window.contentView = NSHostingView(rootView: content)
-            self.window = window
-        }
+        let window = dashboardWindow()
 
         store.setWindowVisible(true)
-        window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    private func dashboardWindow() -> NSWindow {
+        if let window {
+            return window
+        }
+
+        let content = ControlView(store: store)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Mac Fan Control"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.delegate = self
+        window.contentView = NSHostingView(rootView: content)
+        self.window = window
+        return window
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -82,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.toolTip = "Mac Fan Control"
             button.target = self
             button.action = #selector(showWindow)
+            button.sendAction(on: [.leftMouseUp])
         }
 
         statusItem = item
@@ -175,6 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showPermissionAlert(message: "\(state.title)。请在系统设置的登录项中允许 Mac Fan Control 后重新打开。")
             return false
         } catch {
+            if let state = try? FanControlHelperClient.shared.installLocalDevelopmentDaemon(),
+               state == .enabled {
+                return true
+            }
             FanControlHelperClient.shared.openLoginItems()
             showPermissionAlert(message: "\(error.localizedDescription)\n请在系统设置的登录项中允许 Mac Fan Control 后重新打开。")
             return false

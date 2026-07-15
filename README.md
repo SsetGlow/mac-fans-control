@@ -26,13 +26,16 @@ build/Mac Fan Control.app
 open "build/Mac Fan Control.app"
 ```
 
-或者安装到 `/Applications`：
+默认 `./build.sh` 使用 ad-hoc 签名。首次从 DMG 安装并启动时，应用会请求管理员授权，将风扇控制 helper 安装为仅允许当前 App 构建连接的系统 LaunchDaemon。
+
+开发者也可以使用 Apple 代码签名身份构建，通过 `SMAppService` 安装 helper：
 
 ```bash
-./install.sh
+security find-identity -v -p codesigning
+CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./install.sh
 ```
 
-`install.sh` 每次都会重新生成一个新的 `.app` 包，替换 `/Applications/Mac Fan Control.app` 中的旧版本，并尝试注册风扇控制 helper。macOS 可能会要求在“系统设置 -> 登录项”中批准该 helper；应用启动时会检查 helper 权限，未启用时会打开系统设置并退出，不进入控制面板。
+`install.sh` 用于 Apple 签名的开发构建：它会重新生成 `.app`、替换 `/Applications/Mac Fan Control.app`，并强制重新注册本次构建内的风扇控制 helper。
 
 ## 传感器探测
 
