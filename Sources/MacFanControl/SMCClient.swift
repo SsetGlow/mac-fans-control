@@ -1,7 +1,7 @@
 import Foundation
 import IOKit
 
-struct FanReading: Identifiable {
+struct FanReading: Identifiable, Sendable {
     let index: Int
     let currentRPM: Double?
     let minimumRPM: Double?
@@ -12,7 +12,7 @@ struct FanReading: Identifiable {
     var id: Int { index }
 }
 
-struct TemperatureReading: Identifiable {
+struct TemperatureReading: Identifiable, Sendable {
     let key: String
     let label: String
     let group: TemperatureScope
@@ -21,7 +21,7 @@ struct TemperatureReading: Identifiable {
     var id: String { key }
 }
 
-struct HardwareSnapshot {
+struct HardwareSnapshot: Sendable {
     let sampledAt: Date
     let fans: [FanReading]
     let temperatures: [TemperatureReading]
@@ -43,7 +43,7 @@ struct HardwareSnapshot {
     }
 }
 
-enum TemperatureScope: String, CaseIterable, Identifiable {
+enum TemperatureScope: String, CaseIterable, Identifiable, Sendable {
     case all
     case cpu
     case gpu
@@ -88,8 +88,9 @@ enum SMCClientError: LocalizedError {
     }
 }
 
-final class HardwareMonitor {
+final class HardwareMonitor: @unchecked Sendable {
     private let smc: SMCClient
+    private let accessLock = NSLock()
     private var temperatureKeys: [String]?
 
     init() throws {
@@ -97,6 +98,9 @@ final class HardwareMonitor {
     }
 
     func snapshot() -> HardwareSnapshot {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+
         do {
             let fans = try readFans()
             let temperatures = try readTemperatures()
@@ -120,25 +124,31 @@ final class HardwareMonitor {
     }
 
     func setAllFans(targetRPM: Double) throws {
-        let fans = try readFans()
-        guard !fans.isEmpty else {
-            throw SMCClientError.noFansAvailable
-        }
-        for fan in fans {
-            try smc.setFan(index: fan.index, rpm: targetRPM)
+        try withExclusiveAccess {
+            let fans = try readFans()
+            guard !fans.isEmpty else {
+                throw SMCClientError.noFansAvailable
+            }
+            for fan in fans {
+                try smc.setFan(index: fan.index, rpm: targetRPM)
+            }
         }
     }
 
     func setFan(index: Int, targetRPM: Double) throws {
-        let fans = try readFans()
-        guard fans.contains(where: { $0.index == index }) else {
-            throw SMCClientError.noFansAvailable
+        try withExclusiveAccess {
+            let fans = try readFans()
+            guard fans.contains(where: { $0.index == index }) else {
+                throw SMCClientError.noFansAvailable
+            }
+            try smc.setFan(index: index, rpm: targetRPM)
         }
-        try smc.setFan(index: index, rpm: targetRPM)
     }
 
     func restoreAutomaticControl() throws {
-        try smc.restoreAutomaticFanControl()
+        try withExclusiveAccess {
+            try smc.restoreAutomaticFanControl()
+        }
     }
 
     private func readFans() throws -> [FanReading] {
@@ -158,9 +168,19 @@ final class HardwareMonitor {
     }
 
     private func readTemperatures() throws -> [TemperatureReading] {
+        #if arch(arm64)
+        let isInitialTemperatureRead = temperatureKeys == nil
+        if temperatureKeys == nil {
+            // Apple Silicon exposes CPU/GPU temperatures through HID. Walking every
+            // SMC key here costs close to a second on real hardware, so only probe
+            // the small set of known auxiliary keys and cache the ones that exist.
+            temperatureKeys = fallbackTemperatureKeys()
+        }
+        #else
         if temperatureKeys == nil {
             temperatureKeys = smc.discoverTemperatureKeys()
         }
+        #endif
 
         let hid = AppleSiliconTemperatureReader.read()
         let keys = temperatureKeys ?? []
@@ -176,6 +196,12 @@ final class HardwareMonitor {
         }
         let battery = readBatteryTemperatures()
 
+        #if arch(arm64)
+        if isInitialTemperatureRead {
+            temperatureKeys = discovered.map(\.key)
+        }
+        return sortedTemperatures(uniqueTemperatures(discovered + hid + battery))
+        #else
         if !discovered.isEmpty {
             return sortedTemperatures(uniqueTemperatures(discovered + hid + battery))
         }
@@ -186,6 +212,7 @@ final class HardwareMonitor {
             return TemperatureReading(key: key, label: label(for: key, group: group), group: group, celsius: value)
         }
         return sortedTemperatures(uniqueTemperatures(fallback + hid + battery))
+        #endif
     }
 
     private func sortedTemperatures(_ readings: [TemperatureReading]) -> [TemperatureReading] {
@@ -258,6 +285,12 @@ final class HardwareMonitor {
         return readings.filter { reading in
             seen.insert(reading.key).inserted
         }
+    }
+
+    private func withExclusiveAccess<T>(_ operation: () throws -> T) rethrows -> T {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return try operation()
     }
 }
 
